@@ -61,7 +61,73 @@ class _RoomsScreenState extends State<RoomsScreen> {
     c.dispose();if(title==null||title.trim().length<3)return;
     try{await Api.post('/rooms',{'title':title.trim()},widget.token);reload();}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('$e')));}
   }
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('BÖRÜ • Sesli Odalar'),actions:[IconButton(tooltip:'Coin ve hediyeler',onPressed:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>WalletScreen(token:widget.token))),icon:const Icon(Icons.toll)),IconButton(onPressed:reload,icon:const Icon(Icons.refresh))]),floatingActionButton:FloatingActionButton(onPressed:create,child:const Icon(Icons.add)),body:FutureBuilder<List<dynamic>>(future:future,builder:(context,s){if(!s.hasData)return Center(child:Text(s.hasError?'Hata: ${s.error}':'Odalar yükleniyor...'));if(s.data!.isEmpty)return const Center(child:Text('Henüz oda yok. İlk odayı oluştur!'));return ListView.builder(itemCount:s.data!.length,itemBuilder:(ctx,i){final room=s.data![i] as Map<String,dynamic>;return Card(color:const Color(0xFF1B1838),child:ListTile(leading:const Icon(Icons.mic,color:purple),title:Text(room['title'].toString()),trailing:const Icon(Icons.chevron_right),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>InteractiveRoomScreen(roomId:room['id'].toString(),title:room['title'].toString(),token:widget.token))));});}));
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('BÖRÜ - Sesli Odalar'),
+        actions: [
+          IconButton(
+            tooltip: 'Coin ve hediyeler',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => WalletScreen(token: widget.token),
+              ),
+            ),
+            icon: const Icon(Icons.toll),
+          ),
+          IconButton(
+            onPressed: reload,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: create,
+        child: const Icon(Icons.add),
+      ),
+      body: FutureBuilder<List<dynamic>>(
+        future: future,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(child: Text('Hata: ${snapshot.error}'));
+          }
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final rooms = snapshot.data!;
+          if (rooms.isEmpty) {
+            return const Center(child: Text('Henüz oda yok. İlk odayı oluştur!'));
+          }
+          return ListView.builder(
+            itemCount: rooms.length,
+            itemBuilder: (context, index) {
+              final room = rooms[index] as Map<String, dynamic>;
+              return Card(
+                color: const Color(0xFF1B1838),
+                child: ListTile(
+                  leading: const Icon(Icons.mic, color: Colors.purple),
+                  title: Text(room['title'].toString()),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => InteractiveRoomScreen(
+                        roomId: room['id'].toString(),
+                        title: room['title'].toString(),
+                        token: widget.token,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
 }
 class VoiceRoomScreen extends StatefulWidget {final String roomId,title,token;const VoiceRoomScreen({super.key,required this.roomId,required this.title,required this.token});@override State<VoiceRoomScreen> createState()=>_VoiceRoomScreenState();}
 class _VoiceRoomScreenState extends State<VoiceRoomScreen> {
