@@ -146,12 +146,12 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     if (!url || !key || !secret) throw new ServiceUnavailableException('LiveKit not configured');
     const token = new AccessToken(key, secret, { identity:user.id, name:user.displayName, ttl:'15m' });
     const seat=await this.db.roomSeat.findFirst({where:{roomId,userId:user.id}});
-    token.addGrant({ roomJoin:true, room:`boru_${room.id}`, canPublish:!!seat, canSubscribe:true, canPublishData:true });
-    return {serverUrl:url, token:await token.toJwt(), roomId:room.id};
+    token.addGrant({ roomJoin:true, room:`boru_${roomId}`, canPublish:!!seat, canSubscribe:true, canPublishData:true });
+    return {serverUrl:url, token:await token.toJwt(), roomId:roomId};
   }
   @Get('rooms/:id/participants') async participants(@Param('id') id:string,@Headers('authorization') auth?:string){
     await this.roomAccess(id,auth);
-    try {const participants=await livekitClient().listParticipants(`boru_${id}`);return participants.map(p=>({id:p.identity,name:p.name,isSpeaking:p.isSpeaking}));}
+    try {const participants=await livekitClient().listParticipants(`boru_${id}`);return participants.map(p=>({id:p.identity,name:p.name,isSpeaking:false}));}
     catch(e){throw new ServiceUnavailableException('Live participant list unavailable');}
   }
   @Get('rooms/:id/moderators') async moderators(@Param('id') id:string,@Headers('authorization') auth?:string){
