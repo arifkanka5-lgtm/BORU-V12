@@ -1,0 +1,200 @@
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql" url = env("DATABASE_URL") }
+model User {
+  id String @id @default(uuid())
+  publicId Int @unique @default(autoincrement())
+  email String @unique
+  passwordHash String
+  displayName String
+  countryCode String? @db.VarChar(2)
+  avatarUrl String?
+  suspendedAt DateTime?
+  createdAt DateTime @default(now())
+  rooms Room[]
+  seats RoomSeat[]
+  roomMessages RoomMessage[]
+  moderatorAssignments RoomModerator[]
+}
+model Room {
+  id String @id @default(uuid())
+  title String
+  isPrivate Boolean @default(false)
+  ownerId String
+  owner User @relation(fields:[ownerId],references:[id])
+  seats RoomSeat[]
+  messages RoomMessage[]
+  bans RoomBan[]
+  moderators RoomModerator[]
+  createdAt DateTime @default(now())
+}
+
+model RoomSeat {
+  id String @id @default(uuid())
+  roomId String
+  room Room @relation(fields:[roomId], references:[id], onDelete:Cascade)
+  seatNumber Int
+  userId String?
+  user User? @relation(fields:[userId], references:[id], onDelete:SetNull)
+  updatedAt DateTime @updatedAt
+  @@unique([roomId, seatNumber])
+  @@index([roomId, userId])
+}
+model RoomMessage {
+  id String @id @default(uuid())
+  roomId String
+  room Room @relation(fields:[roomId], references:[id], onDelete:Cascade)
+  senderId String
+  sender User @relation(fields:[senderId], references:[id])
+  content String @db.VarChar(500)
+  createdAt DateTime @default(now())
+  @@index([roomId, createdAt])
+}
+model RoomBan {
+  id String @id @default(uuid())
+  roomId String
+  room Room @relation(fields:[roomId], references:[id], onDelete:Cascade)
+  userId String
+  createdAt DateTime @default(now())
+  @@unique([roomId,userId])
+}
+
+model RoomModerator {
+  id String @id @default(uuid())
+  roomId String
+  userId String
+  room Room @relation(fields:[roomId], references:[id], onDelete:Cascade)
+  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+  createdAt DateTime @default(now())
+  @@unique([roomId,userId])
+}
+
+
+// V6: no cashout, agency, or creator payout models.
+model CoinWallet {
+  userId String @id
+  balance BigInt @default(0)
+  updatedAt DateTime @updatedAt
+}
+model CoinLedger {
+  id String @id @default(uuid())
+  userId String
+  amount BigInt
+  balanceAfter BigInt
+  reason String
+  referenceId String @unique
+  createdAt DateTime @default(now())
+  @@index([userId,createdAt])
+}
+model CoinPackage {
+  id String @id @default(uuid())
+  title String
+  coins BigInt
+  storeProductId String @unique
+  active Boolean @default(true)
+}
+model Gift {
+  id String @id @default(uuid())
+  name String
+  priceCoins BigInt
+  animationUrl String?
+  active Boolean @default(true)
+}
+model GiftSend {
+  id String @id @default(uuid())
+  senderId String
+  receiverId String
+  roomId String
+  giftId String
+  quantity Int
+  costCoins BigInt
+  createdAt DateTime @default(now())
+  @@index([roomId,createdAt])
+  @@index([senderId,createdAt])
+}
+model VipPlan {
+  id String @id @default(uuid())
+  name String
+  durationDays Int
+  storeProductId String @unique
+  active Boolean @default(true)
+}
+model VipEntitlement {
+  id String @id @default(uuid())
+  userId String
+  planId String
+  startsAt DateTime
+  endsAt DateTime
+  sourcePurchaseId String @unique
+  @@index([userId,endsAt])
+}
+model StorePurchase {
+  id String @id @default(uuid())
+  userId String
+  platform String
+  productId String
+  storeTransactionId String @unique
+  status String @default("PENDING")
+  createdAt DateTime @default(now())
+  verifiedAt DateTime?
+}
+
+// V8: centralized roles, no agency/payout model.
+model AdminRole {
+  id String @id @default(uuid())
+  userId String
+  role String // SUPER_ADMIN, COUNTRY_ADMIN, SUPPORT
+  countryCode String?
+  createdAt DateTime @default(now())
+  @@unique([userId, role, countryCode])
+  @@index([userId])
+}
+model AdminAudit {
+  id String @id @default(uuid())
+  actorId String
+  action String
+  targetId String?
+  details Json?
+  createdAt DateTime @default(now())
+  @@index([actorId, createdAt])
+}
+
+// V9: reports, support tickets and country-scoped moderation.
+model UserReport {
+  id String @id @default(uuid())
+  reporterId String
+  targetUserId String?
+  roomId String?
+  countryCode String @db.VarChar(2)
+  category String
+  description String @db.VarChar(2000)
+  status String @default("OPEN")
+  assignedToId String?
+  resolutionNote String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([countryCode,status,createdAt])
+  @@index([reporterId,createdAt])
+}
+model SupportTicket {
+  id String @id @default(uuid())
+  userId String
+  countryCode String @db.VarChar(2)
+  subject String @db.VarChar(160)
+  description String @db.VarChar(4000)
+  status String @default("OPEN")
+  assignedToId String?
+  resolutionNote String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([countryCode,status,createdAt])
+  @@index([userId,createdAt])
+}
+
+// V10: TOTP admin MFA; secret encrypted at rest, replay prevention.
+model AdminMfa {
+ userId String @id
+ encryptedSecret String
+ enabled Boolean @default(false)
+ lastUsedStep BigInt @default(-1)
+ createdAt DateTime @default(now())
+}

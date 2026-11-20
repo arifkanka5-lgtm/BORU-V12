@@ -1,0 +1,9 @@
+**/.dart_tool/
+**/build/
+**/.flutter-plugins*
+**/node_modules/
+**/.env
+**/.env.*
+!**/.env.example
+**/.next/
+**/.gradle/

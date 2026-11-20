@@ -1,0 +1,14 @@
+PASS Present: backend/package.json
+PASS Present: backend/prisma/schema.prisma
+PASS Present: mobile/pubspec.yaml
+PASS Present: mobile/lib/main.dart
+PASS Present: admin/package.json
+PASS Valid JSON: backend/package.json
+PASS Valid JSON: admin/package.json
+PASS Default API URL is for emulator only
+PASS Microphone defaults off in basic voice screen
+PASS LiveKit token uses server seat grant
+PASS No local secrets included
+BLOCK Flutter Android project generated
+11/12 checks passed
+Exit code: 1

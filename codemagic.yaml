@@ -1,0 +1,23 @@
+workflows:
+  boru_android_debug:
+    name: BORU Android Debug APK
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      groups: []
+    scripts:
+      - name: Generate Android project
+        script: |
+          cd mobile
+          flutter create --platforms=android --project-name=boru_mobile .
+      - name: Resolve dependencies
+        script: |
+          cd mobile
+          flutter pub get
+      - name: Build Android debug APK
+        script: |
+          cd mobile
+          flutter build apk --debug --dart-define=API_BASE_URL=https://test-api.example.com/api/v1
+    artifacts:
+      - mobile/build/app/outputs/flutter-apk/*.apk
