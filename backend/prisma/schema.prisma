@@ -25,6 +25,7 @@ model User {
 model Room {
   id String @id @default(uuid())
   title String
+  backgroundTheme String @default("classic_dark")
   isPrivate Boolean @default(false)
   ownerId String
   owner User @relation(fields:[ownerId],references:[id])

@@ -2,7 +2,7 @@ import { AdminMfaController } from './admin-security';
 import { Module, Injectable, Controller, Post, Get, Body, Headers, UnauthorizedException, ConflictException, BadRequestException, Param, NotFoundException, ForbiddenException, ServiceUnavailableException, Delete, ParseIntPipe, Query, Patch, HttpCode } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { JwtModule, JwtService } from '@nestjs/jwt';
-import { IsEmail, IsString, MinLength, MaxLength } from 'class-validator';
+import { IsEmail, IsString, MinLength, MaxLength, IsIn } from 'class-validator';
 import * as bcrypt from 'bcryptjs';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 import { WebSocketGateway, WebSocketServer, SubscribeMessage, ConnectedSocket, MessageBody } from '@nestjs/websockets';
@@ -16,7 +16,7 @@ class RegisterDto {
 }
 class LoginDto { @IsEmail() email!: string; @IsString() password!: string; }
 class MessageDto { @IsString() @MinLength(1) @MaxLength(500) content!: string; }
-class RoomDto { @IsString() @MinLength(3) @MaxLength(80) title!: string; }
+class RoomDto { @IsString() @MinLength(3) @MaxLength(80) title!: string; @IsString() @IsIn(["wolf_vip","gold_lounge","purple_lounge","classic_dark"]) backgroundTheme: string = "classic_dark"; }
 @Injectable() class Db extends PrismaClient {}
 @Injectable() class Auth {
   constructor(private db: Db, private jwt: JwtService) {}
@@ -78,7 +78,32 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
   @Post('auth/register') register(@Body() body:RegisterDto) { return this.auth.register(body); }
   @Post('auth/login') login(@Body() body:LoginDto) { return this.auth.login(body); }
   @Get('me') me(@Headers('authorization') auth?:string) { return this.auth.user(auth); }
-  @Get('rooms') rooms() { return this.db.room.findMany({select:{id:true,title:true,isPrivate:true,createdAt:true},where:{isPrivate:false},orderBy:{createdAt:'desc'},take:50}); }
+  @Patch('me') async updateMe(
+    @Headers('authorization') auth:string,
+    @Body() body:{displayName?:string;avatarUrl?:string|null}
+  ) {
+    const user=await this.auth.user(auth);
+    const data:{displayName?:string;avatarUrl?:string|null}={};
+    if(body.displayName!==undefined){
+      if(typeof body.displayName!=='string'||body.displayName.trim().length<2||body.displayName.trim().length>40)
+        throw new BadRequestException('Display name must be 2-40 characters');
+      data.displayName=body.displayName.trim();
+    }
+    if(body.avatarUrl!==undefined){
+      if(body.avatarUrl!==null){
+        if(typeof body.avatarUrl!=='string'||body.avatarUrl.length>2048)
+          throw new BadRequestException('Invalid avatar URL');
+        let url:URL;
+        try{url=new URL(body.avatarUrl);}catch{throw new BadRequestException('Invalid avatar URL');}
+        if(url.protocol!=='https:')throw new BadRequestException('Avatar URL must use HTTPS');
+      }
+      data.avatarUrl=body.avatarUrl;
+    }
+    if(!Object.keys(data).length)throw new BadRequestException('No profile changes');
+    return this.db.user.update({where:{id:user.id},data,select:{id:true,publicId:true,displayName:true,avatarUrl:true}});
+  }
+
+  @Get('rooms') rooms() { return this.db.room.findMany({select:{id:true,title:true,ownerId:true,isPrivate:true,backgroundTheme:true,createdAt:true},where:{isPrivate:false},orderBy:{createdAt:'desc'},take:50}); }
   private async roomAccess(roomId: string, auth?: string) {
     const user = await this.auth.user(auth);
     const room = await this.db.room.findUnique({where:{id:roomId}});
@@ -86,6 +111,15 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     if (await this.db.roomBan.findUnique({where:{roomId_userId:{roomId,userId:user.id}}})) throw new ForbiddenException('Banned from room');
     if (room.isPrivate && room.ownerId !== user.id) throw new ForbiddenException('Private room');
     return {user,room};
+  }
+  @Patch('rooms/:id/theme') async updateRoomTheme(@Param('id') id:string,@Headers('authorization') auth:string,@Body() body:{backgroundTheme:string}) {
+    const {user,room}=await this.roomAccess(id,auth);
+    if(room.ownerId!==user.id)throw new ForbiddenException('Only room owner can change theme');
+    const allowed=['wolf_vip','gold_lounge','purple_lounge','classic_dark'];
+    if(!body || !allowed.includes(body.backgroundTheme))throw new BadRequestException('Invalid room theme');
+    const updated=await this.db.room.update({where:{id},data:{backgroundTheme:body.backgroundTheme},select:{id:true,backgroundTheme:true}});
+    this.events.emitRoom(id,'room:theme:changed',updated);
+    return updated;
   }
   @Get('rooms/:id/seats') async seats(@Param('id') id:string, @Headers('authorization') auth?:string) {
     await this.roomAccess(id,auth);
@@ -178,7 +212,7 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
   }
   @Post('rooms') async createRoom(@Headers('authorization') auth:string,@Body() dto:RoomDto) {
     const user = await this.auth.user(auth);
-    return this.db.room.create({data:{title:dto.title,ownerId:user.id},select:{id:true,title:true,isPrivate:true}});
+    return this.db.room.create({data:{title:dto.title,ownerId:user.id,backgroundTheme:dto.backgroundTheme},select:{id:true,title:true,isPrivate:true,backgroundTheme:true}});
   }
 }
 
@@ -281,7 +315,7 @@ class DevGrantDto {
   }
   @Get('rooms') async rooms(@Headers('authorization') token?:string) {
     await this.check(token,['SUPER_ADMIN','SUPPORT']);
-    return this.db.room.findMany({take:40,orderBy:{createdAt:'desc'},select:{id:true,title:true,ownerId:true,isPrivate:true,createdAt:true}});
+    return this.db.room.findMany({take:40,orderBy:{createdAt:'desc'},select:{id:true,title:true,ownerId:true,isPrivate:true,backgroundTheme:true,createdAt:true}});
   }
   @Get('catalog') async catalog(@Headers('authorization') token?:string) {
     await this.check(token,['SUPER_ADMIN','SUPPORT']);

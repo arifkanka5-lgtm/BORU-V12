@@ -96,6 +96,9 @@ __decorate([
     __metadata("design:type", String)
 ], MessageDto.prototype, "content", void 0);
 class RoomDto {
+    constructor() {
+        this.backgroundTheme = "classic_dark";
+    }
 }
 __decorate([
     (0, class_validator_1.IsString)(),
@@ -103,6 +106,11 @@ __decorate([
     (0, class_validator_1.MaxLength)(80),
     __metadata("design:type", String)
 ], RoomDto.prototype, "title", void 0);
+__decorate([
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.IsIn)(["wolf_vip", "gold_lounge", "purple_lounge", "classic_dark"]),
+    __metadata("design:type", String)
+], RoomDto.prototype, "backgroundTheme", void 0);
 let Db = class Db extends client_1.PrismaClient {
 };
 Db = __decorate([
@@ -227,7 +235,35 @@ let Api = class Api {
     register(body) { return this.auth.register(body); }
     login(body) { return this.auth.login(body); }
     me(auth) { return this.auth.user(auth); }
-    rooms() { return this.db.room.findMany({ select: { id: true, title: true, isPrivate: true, createdAt: true }, where: { isPrivate: false }, orderBy: { createdAt: 'desc' }, take: 50 }); }
+    async updateMe(auth, body) {
+        const user = await this.auth.user(auth);
+        const data = {};
+        if (body.displayName !== undefined) {
+            if (typeof body.displayName !== 'string' || body.displayName.trim().length < 2 || body.displayName.trim().length > 40)
+                throw new common_1.BadRequestException('Display name must be 2-40 characters');
+            data.displayName = body.displayName.trim();
+        }
+        if (body.avatarUrl !== undefined) {
+            if (body.avatarUrl !== null) {
+                if (typeof body.avatarUrl !== 'string' || body.avatarUrl.length > 2048)
+                    throw new common_1.BadRequestException('Invalid avatar URL');
+                let url;
+                try {
+                    url = new URL(body.avatarUrl);
+                }
+                catch {
+                    throw new common_1.BadRequestException('Invalid avatar URL');
+                }
+                if (url.protocol !== 'https:')
+                    throw new common_1.BadRequestException('Avatar URL must use HTTPS');
+            }
+            data.avatarUrl = body.avatarUrl;
+        }
+        if (!Object.keys(data).length)
+            throw new common_1.BadRequestException('No profile changes');
+        return this.db.user.update({ where: { id: user.id }, data, select: { id: true, publicId: true, displayName: true, avatarUrl: true } });
+    }
+    rooms() { return this.db.room.findMany({ select: { id: true, title: true, ownerId: true, isPrivate: true, backgroundTheme: true, createdAt: true }, where: { isPrivate: false }, orderBy: { createdAt: 'desc' }, take: 50 }); }
     async roomAccess(roomId, auth) {
         const user = await this.auth.user(auth);
         const room = await this.db.room.findUnique({ where: { id: roomId } });
@@ -238,6 +274,17 @@ let Api = class Api {
         if (room.isPrivate && room.ownerId !== user.id)
             throw new common_1.ForbiddenException('Private room');
         return { user, room };
+    }
+    async updateRoomTheme(id, auth, body) {
+        const { user, room } = await this.roomAccess(id, auth);
+        if (room.ownerId !== user.id)
+            throw new common_1.ForbiddenException('Only room owner can change theme');
+        const allowed = ['wolf_vip', 'gold_lounge', 'purple_lounge', 'classic_dark'];
+        if (!body || !allowed.includes(body.backgroundTheme))
+            throw new common_1.BadRequestException('Invalid room theme');
+        const updated = await this.db.room.update({ where: { id }, data: { backgroundTheme: body.backgroundTheme }, select: { id: true, backgroundTheme: true } });
+        this.events.emitRoom(id, 'room:theme:changed', updated);
+        return updated;
     }
     async seats(id, auth) {
         await this.roomAccess(id, auth);
@@ -376,7 +423,7 @@ let Api = class Api {
     }
     async createRoom(auth, dto) {
         const user = await this.auth.user(auth);
-        return this.db.room.create({ data: { title: dto.title, ownerId: user.id }, select: { id: true, title: true, isPrivate: true } });
+        return this.db.room.create({ data: { title: dto.title, ownerId: user.id, backgroundTheme: dto.backgroundTheme }, select: { id: true, title: true, isPrivate: true, backgroundTheme: true } });
     }
 };
 __decorate([
@@ -407,11 +454,28 @@ __decorate([
     __metadata("design:returntype", void 0)
 ], Api.prototype, "me", null);
 __decorate([
+    (0, common_1.Patch)('me'),
+    __param(0, (0, common_1.Headers)('authorization')),
+    __param(1, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", Promise)
+], Api.prototype, "updateMe", null);
+__decorate([
     (0, common_1.Get)('rooms'),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", void 0)
 ], Api.prototype, "rooms", null);
+__decorate([
+    (0, common_1.Patch)('rooms/:id/theme'),
+    __param(0, (0, common_1.Param)('id')),
+    __param(1, (0, common_1.Headers)('authorization')),
+    __param(2, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String, Object]),
+    __metadata("design:returntype", Promise)
+], Api.prototype, "updateRoomTheme", null);
 __decorate([
     (0, common_1.Get)('rooms/:id/seats'),
     __param(0, (0, common_1.Param)('id')),
@@ -735,7 +799,7 @@ let AdminApi = class AdminApi {
     }
     async rooms(token) {
         await this.check(token, ['SUPER_ADMIN', 'SUPPORT']);
-        return this.db.room.findMany({ take: 40, orderBy: { createdAt: 'desc' }, select: { id: true, title: true, ownerId: true, isPrivate: true, createdAt: true } });
+        return this.db.room.findMany({ take: 40, orderBy: { createdAt: 'desc' }, select: { id: true, title: true, ownerId: true, isPrivate: true, backgroundTheme: true, createdAt: true } });
     }
     async catalog(token) {
         await this.check(token, ['SUPER_ADMIN', 'SUPPORT']);

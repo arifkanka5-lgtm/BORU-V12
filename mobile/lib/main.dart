@@ -1,5 +1,10 @@
+import 'room_backgrounds.dart';
+import 'boru_home.dart';
+import 'boru_theme.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'dart:convert';
+import 'dart:io';
+import 'package:image_picker/image_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -13,7 +18,7 @@ const purple = Color(0xFF7B2FE8);
 void main() => runApp(const BoruApp());
 class BoruApp extends StatelessWidget {
   const BoruApp({super.key});
-  @override Widget build(BuildContext context) => MaterialApp(debugShowCheckedModeBanner:false, title:'BÖRÜ', theme:ThemeData.dark().copyWith(scaffoldBackgroundColor:bg,colorScheme:const ColorScheme.dark(primary:purple)), home:const LoginScreen());
+  @override Widget build(BuildContext context) => MaterialApp(debugShowCheckedModeBanner:false, title:'BÖRÜ', theme:BoruTheme.dark, home:const LoginScreen());
 }
 class Api {
   static Future<dynamic> getAuthorized(String path,String token) async {
@@ -41,7 +46,7 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> submit() async {
     setState(() {busy=true;error=null;});
     try {
-      if(register) await Api.post('/auth/register',{'email':email.text.trim(),'password':password.text,'displayName':name.text.trim()});
+      if(register) await Api.post('/auth/register',{'email':email.text.trim(),'password':password.text,'displayName':name.text.trim(),'countryCode':'TR'});
       final response=await Api.post('/auth/login',{'email':email.text.trim(),'password':password.text});
       if(mounted) Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>RoomsScreen(token:response['accessToken'] as String)));
     } catch(e) {if(mounted)setState(()=>error=e.toString());}
@@ -53,13 +58,53 @@ class _LoginScreenState extends State<LoginScreen> {
 class RoomsScreen extends StatefulWidget {final String token;const RoomsScreen({super.key,required this.token});@override State<RoomsScreen> createState()=>_RoomsScreenState();}
 class _RoomsScreenState extends State<RoomsScreen> {
   late Future<List<dynamic>> future;
-  @override void initState(){super.initState();reload();}
-  void reload()=>setState(()=>future=Api.rooms());
+  @override void initState(){super.initState();future = Api.rooms();}
+  void reload() => setState(() { future = Api.rooms(); });
   Future<void> create() async {
     final c=TextEditingController();
-    final title=await showDialog<String>(context:context,builder:(ctx)=>AlertDialog(title:const Text('Yeni oda'),content:TextField(controller:c,decoration:const InputDecoration(hintText:'Oda adı')),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('İptal')),FilledButton(onPressed:()=>Navigator.pop(ctx,c.text),child:const Text('Oluştur'))]));
+    int selectedBackground = 0;
+    final title = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Yeni BÖRÜ Odası'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: c,
+                  decoration: const InputDecoration(
+                    labelText: 'Oda adı',
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text('Oda arka planını seç'),
+                const SizedBox(height: 12),
+                RoomBackgroundPicker(
+                  onSelected: (index) {
+                    selectedBackground = index;
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('İptal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, c.text),
+            child: const Text('Oluştur'),
+          ),
+        ],
+      ),
+    );
     c.dispose();if(title==null||title.trim().length<3)return;
-    try{await Api.post('/rooms',{'title':title.trim()},widget.token);reload();}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('$e')));}
+    try{await Api.post('/rooms',{'title':title.trim(),'backgroundTheme':RoomBackgrounds.files[selectedBackground].replaceAll('.png','')},widget.token);reload();}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('$e')));}
   }
   @override
   Widget build(BuildContext context) {
@@ -67,6 +112,16 @@ class _RoomsScreenState extends State<RoomsScreen> {
       appBar: AppBar(
         title: const Text('BÖRÜ - Sesli Odalar'),
         actions: [
+          IconButton(
+            tooltip: 'Profilim',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ProfileScreen(token: widget.token),
+              ),
+            ),
+            icon: const Icon(Icons.account_circle_outlined),
+          ),
           IconButton(
             tooltip: 'Coin ve hediyeler',
             onPressed: () => Navigator.push(
@@ -87,6 +142,42 @@ class _RoomsScreenState extends State<RoomsScreen> {
         onPressed: create,
         child: const Icon(Icons.add),
       ),
+      bottomNavigationBar: NavigationBar(
+      selectedIndex: 1,
+      backgroundColor: BoruTheme.panel,
+      indicatorColor: BoruTheme.purple,
+      onDestinationSelected: (i) {
+        if (i == 0) {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => Scaffold(
+              appBar: AppBar(title: const Text('BÖRÜ')),
+              body: BoruHome(
+                onRooms: () => Navigator.pop(context),
+                onVip: () => Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => WalletScreen(token: widget.token))),
+              ),
+            ),
+          ));
+          return;
+        }
+        if (i == 1) { reload(); return; }
+        if (i == 2) { create(); return; }
+        if (i == 4) {
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => ProfileScreen(token: widget.token)));
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(i == 0 ? 'Ana sayfa hazırlanıyor' : 'Mesajlar hazırlanıyor')));
+      },
+      destinations: const [
+        NavigationDestination(icon: Icon(Icons.home_outlined), label: 'Ana Sayfa'),
+        NavigationDestination(icon: Icon(Icons.mic_none), label: 'Odalar'),
+        NavigationDestination(icon: Icon(Icons.add_circle_outline), label: 'Oluştur'),
+        NavigationDestination(icon: Icon(Icons.chat_outlined), label: 'Mesajlar'),
+        NavigationDestination(icon: Icon(Icons.person_outline), label: 'Profil'),
+      ],
+    ),
       body: FutureBuilder<List<dynamic>>(
         future: future,
         builder: (context, snapshot) {
@@ -116,6 +207,8 @@ class _RoomsScreenState extends State<RoomsScreen> {
                       builder: (_) => InteractiveRoomScreen(
                         roomId: room['id'].toString(),
                         title: room['title'].toString(),
+                        backgroundTheme: room['backgroundTheme']?.toString() ?? "classic_dark",
+                        ownerId: room['ownerId']?.toString() ?? '',
                         token: widget.token,
                       ),
                     ),
@@ -129,6 +222,93 @@ class _RoomsScreenState extends State<RoomsScreen> {
     );
   }
 }
+class ProfileScreen extends StatefulWidget {
+  final String token;
+  const ProfileScreen({super.key, required this.token});
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  late Future<dynamic> profile;
+  XFile? selectedPhoto;
+
+  Future<void> choosePhoto(ImageSource source) async {
+    try {
+      final photo = await ImagePicker().pickImage(source: source, imageQuality: 80, maxWidth: 1200);
+      if (photo != null && mounted) setState(() => selectedPhoto = photo);
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fotoğraf seçilemedi: $e')));
+    }
+  }
+
+  void showPhotoOptions() {
+    showModalBottomSheet<void>(context: context, builder: (ctx) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      ListTile(leading: const Icon(Icons.photo_library), title: const Text('Galeriden seç'), onTap: () { Navigator.pop(ctx); choosePhoto(ImageSource.gallery); }),
+      ListTile(leading: const Icon(Icons.camera_alt), title: const Text('Fotoğraf çek'), onTap: () { Navigator.pop(ctx); choosePhoto(ImageSource.camera); }),
+    ])));
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    profile = Api.getAuthorized('/me', widget.token);
+  }
+
+  void reload() {
+    setState(() {
+      profile = Api.getAuthorized('/me', widget.token);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Profilim'),
+        actions: [IconButton(onPressed: reload, icon: const Icon(Icons.refresh))],
+      ),
+      body: FutureBuilder<dynamic>(
+        future: profile,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(child: Text('Profil yüklenemedi: ${snapshot.error}'));
+          }
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final user = Map<String, dynamic>.from(snapshot.data as Map);
+          final avatar = user['avatarUrl']?.toString() ?? '';
+          return ListView(
+            padding: const EdgeInsets.all(24),
+            children: [
+              Center(
+                child: CircleAvatar(
+                  radius: 55,
+                  backgroundColor: purple,
+                  backgroundImage: selectedPhoto != null ? FileImage(File(selectedPhoto!.path)) as ImageProvider<Object> : (avatar.startsWith('https://') ? NetworkImage(avatar) as ImageProvider<Object> : null),
+                  child: selectedPhoto != null || avatar.startsWith('https://') ? null : const Icon(Icons.person, size: 60),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Center(child: OutlinedButton.icon(onPressed: showPhotoOptions, icon: const Icon(Icons.add_a_photo), label: const Text('Fotoğraf değiştir'))),
+              if (selectedPhoto != null) const Center(child: Text('Fotoğraf önizlemesi — henüz sunucuya kaydedilmedi', style: TextStyle(fontSize: 12))),
+              const SizedBox(height: 24),
+              Center(child: Text(user['displayName']?.toString() ?? 'Kullanıcı',
+                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))),
+              const SizedBox(height: 24),
+              ListTile(leading: const Icon(Icons.badge_outlined),
+                title: const Text('BÖRÜ ID'), subtitle: Text('${user['publicId'] ?? '-'}')),
+              ListTile(leading: const Icon(Icons.email_outlined),
+                title: const Text('E-posta'), subtitle: Text('${user['email'] ?? '-'}')),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
 class VoiceRoomScreen extends StatefulWidget {final String roomId,title,token;const VoiceRoomScreen({super.key,required this.roomId,required this.title,required this.token});@override State<VoiceRoomScreen> createState()=>_VoiceRoomScreenState();}
 class _VoiceRoomScreenState extends State<VoiceRoomScreen> {
   lk.Room? room;bool connecting=true, muted=true;String? error;
@@ -156,7 +336,9 @@ class _VoiceRoomScreenState extends State<VoiceRoomScreen> {
 // V5: live room experience. Gifts are preview-only until a verified ledger exists.
 class InteractiveRoomScreen extends StatefulWidget {
   final String roomId, title, token;
-  const InteractiveRoomScreen({super.key, required this.roomId, required this.title, required this.token});
+  final String backgroundTheme;
+  final String ownerId;
+  const InteractiveRoomScreen({super.key, required this.roomId, required this.title, required this.token, required this.ownerId, this.backgroundTheme = "classic_dark"});
   @override State<InteractiveRoomScreen> createState() => _InteractiveRoomScreenState();
 }
 class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
@@ -167,11 +349,63 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
   List<dynamic> seats=[], messages=[], participants=[], moderators=[];
   String? error, myId;
   bool loading=true, sending=false, voiceConnecting=false, micOn=false;
-  @override void initState(){super.initState();initialize();}
+  late String currentTheme;
+  @override void initState(){super.initState();currentTheme=widget.backgroundTheme;initialize();}
   Future<dynamic> get(String path) async {
     final r=await http.get(Uri.parse('$apiBase$path'),headers:{'Authorization':'Bearer ${widget.token}'});
     if(r.statusCode>=300)throw Exception('HTTP ${r.statusCode}: ${r.body}');
     return jsonDecode(r.body);
+  }
+  Future<void> showRoomSettings() async {
+    if(myId == null || myId != widget.ownerId) return;
+    int selected = RoomBackgrounds.files.indexOf('${currentTheme}.png');
+    if(selected < 0) selected = 3;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Oda Ayarları • Tema Değiştir'),
+        content: SizedBox(
+          width: 340,
+          child: SingleChildScrollView(
+            child: RoomBackgroundPicker(initialIndex: selected, onSelected: (index) => selected = index),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('İptal')),
+          FilledButton(
+            onPressed: () async {
+              final theme = RoomBackgrounds.files[selected].replaceAll('.png', '');
+              try {
+                final response = await http.patch(
+                  Uri.parse('$apiBase/rooms/${widget.roomId}/theme'),
+                  headers: {
+                    'Authorization': 'Bearer ${widget.token}',
+                    'Content-Type': 'application/json',
+                  },
+                  body: jsonEncode({'backgroundTheme': theme}),
+                );
+                if (response.statusCode >= 300) {
+                  throw Exception('Tema kaydedilemedi: ${response.body}');
+                }
+                if (!mounted) return;
+                setState(() => currentTheme = theme);
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Tema kaydedildi: ${RoomBackgrounds.names[selected]}')),
+                );
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('$e')),
+                  );
+                }
+              }
+            },
+            child: const Text('Kaydet'),
+          ),
+        ],
+      ),
+    );
   }
   Future<void> initialize() async {
     try {final me=await get('/me');myId=me['id']?.toString();}catch(e){error='$e';}
@@ -180,6 +414,13 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
     socket=io.io('${base.scheme}://${base.authority}/rooms',io.OptionBuilder().setTransports(['websocket']).disableAutoConnect().setAuth({'token':widget.token}).build());
     socket!.onConnect((_){socket!.emit('room:join',{'roomId':widget.roomId});});
     for(final event in ['seats:changed','message:new','moderators:changed','participant:muted']) {socket!.on(event,(_){if(mounted)refresh();});}
+    socket!.on('room:theme:changed',(data){
+      if(!mounted || data is! Map) return;
+      if(data['id']?.toString()!=widget.roomId) return;
+      final theme=data['backgroundTheme']?.toString();
+      if(theme==null || !RoomBackgrounds.files.contains('$theme.png')) return;
+      setState(()=>currentTheme=theme);
+    });
     socket!.on('room:kicked',(_){if(mounted){ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Odadan çıkarıldınız')));Navigator.pop(context);}});
     socket!.connect();
   }
@@ -204,7 +445,7 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
   });
   Future<void> sendMessage() async {
     final content=input.text.trim();if(content.isEmpty)return;
-    await action(() async {await Api.post('/rooms/${widget.roomId}/messages',{'content':content},widget.token);input.clear();});
+    await action(() async {await Api.post('/rooms/${widget.roomId}/messages',{'content':content},widget.token);input.clear();await refresh();});
   }
   bool get hasSeat=>seats.any((s)=>s['userId']?.toString()==myId);
   Future<void> connectVoice() async {
@@ -270,10 +511,11 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
     ])));
   }
   Widget _seat(int number,Map<int,dynamic> occupied){
+    final vipSeat=number==1;
     final item=occupied[number];final user=item?['user'];final userId=item?['userId']?.toString();
-    final name=user?['displayName']?.toString()??'Koltuk $number';final mine=userId!=null&&userId==myId;
-    return InkWell(borderRadius:BorderRadius.circular(18),onTap:sending?null:(){if(item==null)takeSeat(number);else if(mine)releaseSeat(number);else if(userId!=null)moderatorMenu(userId,name);},child:Container(padding:const EdgeInsets.symmetric(vertical:12,horizontal:4),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(18),border:Border.all(color:mine?gold:Colors.white12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[
-      CircleAvatar(radius:23,backgroundColor:mine?purple:const Color(0xFF363052),child:Icon(user==null?Icons.add:Icons.person,color:mine?gold:Colors.white70)),
+    final name=user?['displayName']?.toString()??(vipSeat?'VIP Koltuğu':'Koltuk $number');final mine=userId!=null&&userId==myId;
+    return InkWell(borderRadius:BorderRadius.circular(18),onTap:sending?null:(){if(item==null)takeSeat(number);else if(mine)releaseSeat(number);else if(userId!=null)moderatorMenu(userId,name);},child:Container(padding:const EdgeInsets.symmetric(vertical:12,horizontal:4),decoration:BoxDecoration(color:vipSeat?const Color(0xFF352714):panel,borderRadius:BorderRadius.circular(18),border:Border.all(color:vipSeat?gold:mine?gold:Colors.white12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[
+      CircleAvatar(radius:23,backgroundColor:vipSeat?const Color(0xFF73521B):mine?purple:const Color(0xFF363052),child:Icon(vipSeat?Icons.workspace_premium:user==null?Icons.add:Icons.person,color:vipSeat?gold:mine?gold:Colors.white70)),
       const SizedBox(height:7),Text(name,maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:11,fontWeight:FontWeight.w600)),
       Text(mine?'Sen':user==null?'Boş koltuk':'Konuşmacı',style:TextStyle(fontSize:10,color:mine?gold:Colors.white54))
     ])));
@@ -281,9 +523,91 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
   @override void dispose(){socket?.emit('room:leave',{'roomId':widget.roomId});socket?.dispose();final r=voice;if(r!=null){r.disconnect().then((_)=>r.dispose());}input.dispose();super.dispose();}
   @override Widget build(BuildContext context){
     final occupied=<int,dynamic>{};for(final s in seats){final n=s['seatNumber'];if(n is int&&s['userId']!=null)occupied[n]=s;}
-    return Scaffold(backgroundColor:bg,appBar:AppBar(backgroundColor:bg,title:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(widget.title,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),Text('BÖRÜ • Oda ${widget.roomId.substring(0,widget.roomId.length<8?widget.roomId.length:8)}',style:const TextStyle(fontSize:11,color:Colors.white54))]),actions:[IconButton(tooltip:'Yenile',onPressed:refresh,icon:const Icon(Icons.refresh)),IconButton(tooltip:'Katılımcılar',onPressed:(){showModalBottomSheet(context:context,backgroundColor:panel,builder:(ctx)=>SafeArea(child:ListView(shrinkWrap:true,children:[const ListTile(title:Text('Canlı katılımcılar')),if(participants.isEmpty)const ListTile(title:Text('Aktif katılımcı bilgisi yok')),for(final p in participants)ListTile(leading:const CircleAvatar(child:Icon(Icons.person)),title:Text(p['name']?.toString()??'Kullanıcı'),trailing:p['isSpeaking']==true?const Icon(Icons.graphic_eq,color:gold):null)])));},icon:const Icon(Icons.people_outline))]),body:SafeArea(child:Column(children:[
+    return Scaffold(backgroundColor:bg,appBar:AppBar(backgroundColor:bg,title:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(widget.title,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),Text('BÖRÜ • Oda ${widget.roomId.substring(0,widget.roomId.length<8?widget.roomId.length:8)}',style:const TextStyle(fontSize:11,color:Colors.white54))]),actions:[if(myId != null && myId == widget.ownerId) IconButton(tooltip:'Oda Ayarları',onPressed:showRoomSettings,icon:const Icon(Icons.settings,color:gold)),IconButton(tooltip:'Yenile',onPressed:refresh,icon:const Icon(Icons.refresh)),IconButton(tooltip:'Katılımcılar',onPressed:(){showModalBottomSheet(context:context,backgroundColor:panel,builder:(ctx)=>SafeArea(child:ListView(shrinkWrap:true,children:[const ListTile(title:Text('Canlı katılımcılar')),if(participants.isEmpty)const ListTile(title:Text('Aktif katılımcı bilgisi yok')),for(final p in participants)ListTile(leading:const CircleAvatar(child:Icon(Icons.person)),title:Text(p['name']?.toString()??'Kullanıcı'),trailing:p['isSpeaking']==true?const Icon(Icons.graphic_eq,color:gold):null)])));},icon:const Icon(Icons.people_outline))]),body:SafeArea(child:Column(children:[
       Expanded(child:ListView(children:[
-        Container(margin:const EdgeInsets.fromLTRB(14,8,14,12),padding:const EdgeInsets.all(18),decoration:BoxDecoration(gradient:const LinearGradient(colors:[Color(0xFF422178),Color(0xFF15162E)]),borderRadius:BorderRadius.circular(20)),child:Row(children:[const Icon(Icons.nights_stay,size:44,color:gold),const SizedBox(width:12),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('BÖRÜ VIP ODA',style:TextStyle(color:gold,fontWeight:FontWeight.bold,letterSpacing:2)),Text('${participants.length} canlı katılımcı',style:const TextStyle(color:Colors.white70,fontSize:12))])),const Icon(Icons.auto_awesome,color:gold)])),
+        Container(
+          margin: const EdgeInsets.fromLTRB(14, 8, 14, 12),
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            image: DecorationImage(
+              image: AssetImage(
+                RoomBackgrounds.path(
+                  RoomBackgrounds.files.indexOf('${currentTheme}.png') < 0
+                      ? 3
+                      : RoomBackgrounds.files.indexOf('${currentTheme}.png'),
+                ),
+              ),
+              fit: BoxFit.cover,
+              colorFilter: const ColorFilter.mode(
+                Color(0x99000000),
+                BlendMode.darken,
+              ),
+            ),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: gold, width: 1),
+            boxShadow: [
+              BoxShadow(
+                color: purple.withValues(alpha: 0.25),
+                blurRadius: 22,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              const Icon(
+                Icons.nights_stay,
+                size: 64,
+                color: gold,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                currentTheme == 'wolf_vip' ? 'BÖRÜ VIP ODA' : 'BÖRÜ ODA',
+                style: TextStyle(
+                  color: gold,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 3,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                widget.title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(
+                    Icons.people,
+                    color: Colors.white70,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${participants.length} canlı katılımcı',
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Icon(
+                    Icons.auto_awesome,
+                    color: gold,
+                    size: 20,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
         if(error!=null)Padding(padding:const EdgeInsets.all(12),child:Text(error!,style:const TextStyle(color:Colors.redAccent))),
         Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[const Text('🎙️ Mikrofon Koltukları',style:TextStyle(fontSize:17,fontWeight:FontWeight.bold)),Text('${occupied.length}/8',style:const TextStyle(color:gold))])),
         if(loading)const LinearProgressIndicator(),
