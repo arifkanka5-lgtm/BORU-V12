@@ -16,7 +16,7 @@ class RegisterDto {
 }
 class LoginDto { @IsEmail() email!: string; @IsString() password!: string; }
 class MessageDto { @IsString() @MinLength(1) @MaxLength(500) content!: string; }
-class RoomDto { @IsString() @MinLength(3) @MaxLength(80) title!: string; @IsString() @IsIn(["wolf_vip","gold_lounge","purple_lounge","classic_dark"]) backgroundTheme: string = "classic_dark"; }
+class RoomDto { @IsString() @MinLength(3) @MaxLength(80) title!: string; @IsString() @IsIn(["wolf_vip","gold_lounge","purple_lounge","classic_dark"]) backgroundTheme: string = "classic_dark"; @IsIn([2,6,8,12,18,24]) seatCount: number = 8; }
 @Injectable() class Db extends PrismaClient {}
 @Injectable() class Auth {
   constructor(private db: Db, private jwt: JwtService) {}
@@ -103,7 +103,7 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     return this.db.user.update({where:{id:user.id},data,select:{id:true,publicId:true,displayName:true,avatarUrl:true}});
   }
 
-  @Get('rooms') rooms() { return this.db.room.findMany({select:{id:true,title:true,ownerId:true,isPrivate:true,backgroundTheme:true,createdAt:true},where:{isPrivate:false},orderBy:{createdAt:'desc'},take:50}); }
+  @Get('rooms') rooms() { return this.db.room.findMany({select:{id:true,title:true,ownerId:true,isPrivate:true,backgroundTheme:true,seatCount:true,createdAt:true},where:{isPrivate:false},orderBy:{createdAt:'desc'},take:50}); }
   private async roomAccess(roomId: string, auth?: string) {
     const user = await this.auth.user(auth);
     const room = await this.db.room.findUnique({where:{id:roomId}});
@@ -121,21 +121,56 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     this.events.emitRoom(id,'room:theme:changed',updated);
     return updated;
   }
+  @Patch('rooms/:id/seats/:number/lock')
+  async setSeatLock(
+    @Param('id') id:string,
+    @Param('number',ParseIntPipe) number:number,
+    @Headers('authorization') auth:string,
+    @Body() body:{isLocked:boolean}
+  ) {
+    const {user,room}=await this.roomAccess(id,auth);
+    const moderator=await this.db.roomModerator.findUnique({
+      where:{roomId_userId:{roomId:id,userId:user.id}}
+    });
+    if(room.ownerId!==user.id&&!moderator)
+      throw new ForbiddenException('Manager permission required');
+    if(typeof body?.isLocked!=='boolean')
+      throw new BadRequestException('isLocked must be boolean');
+    if(number<1||number>room.seatCount)
+      throw new BadRequestException('Invalid seat number');
+
+    const seat=await this.db.$transaction(async tx=>{
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
+      return tx.roomSeat.upsert({
+        where:{roomId_seatNumber:{roomId:id,seatNumber:number}},
+        create:{roomId:id,seatNumber:number,isLocked:body.isLocked},
+        update:{isLocked:body.isLocked}
+      });
+    });
+    this.events.emitRoom(id,'seats:changed',{roomId:id});
+    return seat;
+  }
+
   @Get('rooms/:id/seats') async seats(@Param('id') id:string, @Headers('authorization') auth?:string) {
-    await this.roomAccess(id,auth);
+    const {room}=await this.roomAccess(id,auth);
+    await this.db.roomSeat.createMany({
+      data:Array.from({length:room.seatCount},(_,i)=>({roomId:id,seatNumber:i+1})),
+      skipDuplicates:true
+    });
     return this.db.roomSeat.findMany({where:{roomId:id},include:{user:{select:{id:true,displayName:true,avatarUrl:true}}},orderBy:{seatNumber:'asc'}});
   }
   @Post('rooms/:id/seats/:number/take') async takeSeat(@Param('id') id:string,@Param('number',ParseIntPipe) number:number,@Headers('authorization') auth?:string) {
-    const {user}=await this.roomAccess(id,auth);
-    if(number<1||number>8)throw new BadRequestException('Seat must be 1-8');
+    const {user,room}=await this.roomAccess(id,auth);
+    if(number<1||number>room.seatCount)throw new BadRequestException(`Seat must be 1-${room.seatCount}`);
     // Serializes competing seat claims within PostgreSQL transaction.
     const result=await this.db.$transaction(async tx=>{
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
       const existing=await tx.roomSeat.findFirst({where:{roomId:id,userId:user.id}});
-      if(existing && existing.seatNumber!==number)await tx.roomSeat.update({where:{id:existing.id},data:{userId:null}});
+      if(existing && existing.seatNumber!==number)await tx.roomSeat.update({where:{id:existing.id},data:{userId:null,micBlocked:false}});
       const seat=await tx.roomSeat.findUnique({where:{roomId_seatNumber:{roomId:id,seatNumber:number}}});
+      if(seat?.isLocked)throw new ForbiddenException('Seat locked');
       if(seat?.userId && seat.userId!==user.id)throw new ConflictException('Seat occupied');
-      return tx.roomSeat.upsert({where:{roomId_seatNumber:{roomId:id,seatNumber:number}},create:{roomId:id,seatNumber:number,userId:user.id},update:{userId:user.id}});
+      return tx.roomSeat.upsert({where:{roomId_seatNumber:{roomId:id,seatNumber:number}},create:{roomId:id,seatNumber:number,userId:user.id,micBlocked:false},update:{userId:user.id,micBlocked:false}});
     });
     try { await livekitClient().updateParticipant(`boru_${id}`,user.id,undefined,{canPublish:true,canSubscribe:true,canPublishData:true}); } catch(e) { /* user may not be connected yet; token refresh needed */ }
     this.events.emitRoom(id,'seats:changed',{roomId:id});
@@ -146,7 +181,7 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     const seat=await this.db.roomSeat.findUnique({where:{roomId_seatNumber:{roomId:id,seatNumber:number}}});
     if(!seat)throw new NotFoundException('Seat not found');
     if(seat.userId!==user.id && room.ownerId!==user.id)throw new ForbiddenException();
-    await this.db.roomSeat.update({where:{id:seat.id},data:{userId:null}});
+    await this.db.roomSeat.update({where:{id:seat.id},data:{userId:null,micBlocked:false}});
     if(seat.userId){try{await livekitClient().updateParticipant(`boru_${id}`,seat.userId,undefined,{canPublish:false,canSubscribe:true,canPublishData:true});}catch(e){/* participant may be offline */}}
     this.events.emitRoom(id,'seats:changed',{roomId:id});
     return {ok:true};
@@ -166,10 +201,73 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     const moderator=await this.db.roomModerator.findUnique({where:{roomId_userId:{roomId:id,userId:user.id}}});
     if((room.ownerId!==user.id&&!moderator)||userId===room.ownerId)throw new ForbiddenException();
     await this.db.roomBan.upsert({where:{roomId_userId:{roomId:id,userId}},create:{roomId:id,userId},update:{}});
+    await this.db.roomSeat.updateMany({where:{roomId:id,userId},data:{userId:null,micBlocked:false}});
     // Revoke active RTC session as well as future access.
     const url=process.env.LIVEKIT_URL, key=process.env.LIVEKIT_API_KEY, secret=process.env.LIVEKIT_API_SECRET;
     if(url&&key&&secret){const client=new RoomServiceClient(url.replace(/^ws/,'http'),key,secret);try{await client.removeParticipant(`boru_${id}`,userId);}catch(e){ /* offline participant */ }}
     this.events.kick(id,userId);this.events.emitRoom(id,'participant:banned',{userId});
+    this.events.emitRoom(id,'seats:changed',{roomId:id});
+    return {ok:true};
+  }
+  @Post('rooms/:id/kick/:userId') async kickFromRoom(
+    @Param('id') id:string,@Param('userId') userId:string,@Headers('authorization') auth:string
+  ) {
+    const {user,room}=await this.roomAccess(id,auth);
+    const manager=room.ownerId===user.id ||
+      !!await this.db.roomModerator.findUnique({where:{roomId_userId:{roomId:id,userId:user.id}}});
+    if(!manager||userId===room.ownerId||userId===user.id)throw new ForbiddenException();
+    if(!await this.db.user.findUnique({where:{id:userId}}))throw new NotFoundException('User not found');
+    await this.db.roomSeat.updateMany({where:{roomId:id,userId},data:{userId:null,micBlocked:false}});
+    try{await livekitClient().removeParticipant(`boru_${id}`,userId);}catch{/* Participant may be offline. */}
+    this.events.kick(id,userId);
+    this.events.emitRoom(id,'seats:changed',{roomId:id});
+    return {ok:true};
+  }
+  @Patch('rooms/:id/microphone/:userId') async setMicrophonePermission(
+    @Param('id') id:string,@Param('userId') userId:string,
+    @Headers('authorization') auth:string,@Body() body:{blocked:boolean}
+  ) {
+    const {user,room}=await this.roomAccess(id,auth);
+    const manager=room.ownerId===user.id ||
+      !!await this.db.roomModerator.findUnique({where:{roomId_userId:{roomId:id,userId:user.id}}});
+    if(!manager||userId===room.ownerId)throw new ForbiddenException();
+    if(typeof body?.blocked!=='boolean')throw new BadRequestException('blocked must be boolean');
+    const seat=await this.db.roomSeat.findFirst({where:{roomId:id,userId}});
+    if(!seat)throw new BadRequestException('User is not seated');
+    await this.db.roomSeat.update({where:{id:seat.id},data:{micBlocked:body.blocked}});
+    try {
+      await livekitClient().updateParticipant(`boru_${id}`,userId,undefined,
+        {canPublish:!body.blocked,canSubscribe:true,canPublishData:true});
+    } catch(e) {
+      // Offline users retain the DB permission; online errors are surfaced.
+      if(!(e instanceof Error && /not found|does not exist/i.test(e.message)))
+        throw new ServiceUnavailableException('Could not update live microphone permission');
+    }
+    this.events.emitRoom(id,'participant:mic:changed',{userId,blocked:body.blocked});
+    this.events.emitRoom(id,'seats:changed',{roomId:id});
+    return {ok:true,blocked:body.blocked};
+  }
+  @Post('rooms/:id/seats/:number/clear') async clearSeat(
+    @Param('id') id:string,@Param('number',ParseIntPipe) number:number,
+    @Headers('authorization') auth:string
+  ) {
+    const {user,room}=await this.roomAccess(id,auth);
+    const manager=room.ownerId===user.id ||
+      !!await this.db.roomModerator.findUnique({where:{roomId_userId:{roomId:id,userId:user.id}}});
+    if(!manager)throw new ForbiddenException();
+    if(number<1||number>room.seatCount)throw new BadRequestException('Invalid seat number');
+    const previous=await this.db.$transaction(async tx=>{
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
+      const seat=await tx.roomSeat.findUnique({where:{roomId_seatNumber:{roomId:id,seatNumber:number}}});
+      if(!seat?.userId)throw new NotFoundException('Seat is empty');
+      if(seat.userId===room.ownerId)throw new ForbiddenException('Cannot remove room owner');
+      await tx.roomSeat.update({where:{id:seat.id},data:{userId:null,micBlocked:false}});
+      return seat.userId;
+    });
+    try{await livekitClient().updateParticipant(`boru_${id}`,previous,undefined,
+      {canPublish:false,canSubscribe:true,canPublishData:true});}catch{/* Participant may be offline. */}
+    this.events.emitRoom(id,'seats:changed',{roomId:id});
+    this.events.emitRoom(id,'participant:mic:changed',{userId:previous,blocked:true});
     return {ok:true};
   }
   @Post('rooms/:id/rtc-token') async rtcToken(@Headers('authorization') authorization: string, @Param('id') roomId: string) {
@@ -180,7 +278,7 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     if (!url || !key || !secret) throw new ServiceUnavailableException('LiveKit not configured');
     const token = new AccessToken(key, secret, { identity:user.id, name:user.displayName, ttl:'15m' });
     const seat=await this.db.roomSeat.findFirst({where:{roomId,userId:user.id}});
-    token.addGrant({ roomJoin:true, room:`boru_${roomId}`, canPublish:!!seat, canSubscribe:true, canPublishData:true });
+    token.addGrant({ roomJoin:true, room:`boru_${roomId}`, canPublish:!!seat&&!seat.micBlocked, canSubscribe:true, canPublishData:true });
     return {serverUrl:url, token:await token.toJwt(), roomId:roomId};
   }
   @Get('rooms/:id/participants') async participants(@Param('id') id:string,@Headers('authorization') auth?:string){
@@ -206,13 +304,21 @@ function livekitClient(){const url=process.env.LIVEKIT_URL,key=process.env.LIVEK
     const moderator=await this.db.roomModerator.findUnique({where:{roomId_userId:{roomId:id,userId:user.id}}});
     if(room.ownerId!==user.id&&!moderator)throw new ForbiddenException();
     if(userId===room.ownerId)throw new ForbiddenException();
-    await this.db.roomSeat.updateMany({where:{roomId:id,userId},data:{userId:null}});
+    await this.db.roomSeat.updateMany({where:{roomId:id,userId},data:{userId:null,micBlocked:false}});
     try {await livekitClient().updateParticipant(`boru_${id}`,userId,undefined,{canPublish:false,canSubscribe:true,canPublishData:true});}catch(e){/* offline */}
     this.events.emitRoom(id,'seats:changed',{roomId:id});this.events.emitRoom(id,'participant:muted',{userId});return {ok:true};
   }
   @Post('rooms') async createRoom(@Headers('authorization') auth:string,@Body() dto:RoomDto) {
     const user = await this.auth.user(auth);
-    return this.db.room.create({data:{title:dto.title,ownerId:user.id,backgroundTheme:dto.backgroundTheme},select:{id:true,title:true,isPrivate:true,backgroundTheme:true}});
+    const room = await this.db.room.create({
+      data:{title:dto.title,ownerId:user.id,backgroundTheme:dto.backgroundTheme,seatCount:dto.seatCount},
+      select:{id:true,title:true,ownerId:true,isPrivate:true,backgroundTheme:true,seatCount:true}
+    });
+    await this.db.roomSeat.createMany({
+      data:Array.from({length:room.seatCount},(_,i)=>({roomId:room.id,seatNumber:i+1})),
+      skipDuplicates:true
+    });
+    return room;
   }
 }
 
@@ -315,7 +421,7 @@ class DevGrantDto {
   }
   @Get('rooms') async rooms(@Headers('authorization') token?:string) {
     await this.check(token,['SUPER_ADMIN','SUPPORT']);
-    return this.db.room.findMany({take:40,orderBy:{createdAt:'desc'},select:{id:true,title:true,ownerId:true,isPrivate:true,backgroundTheme:true,createdAt:true}});
+    return this.db.room.findMany({take:40,orderBy:{createdAt:'desc'},select:{id:true,title:true,ownerId:true,isPrivate:true,backgroundTheme:true,seatCount:true,createdAt:true}});
   }
   @Get('catalog') async catalog(@Headers('authorization') token?:string) {
     await this.check(token,['SUPER_ADMIN','SUPPORT']);

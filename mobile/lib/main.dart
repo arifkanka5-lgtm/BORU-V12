@@ -63,6 +63,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
   Future<void> create() async {
     final c=TextEditingController();
     int selectedBackground = 0;
+    int selectedSeatCount = 8;
     final title = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -78,6 +79,23 @@ class _RoomsScreenState extends State<RoomsScreen> {
                   decoration: const InputDecoration(
                     labelText: 'Oda adı',
                   ),
+                ),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<int>(
+                  initialValue: selectedSeatCount,
+                  decoration: const InputDecoration(
+                    labelText: 'Oda koltuk kapasitesi',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [2, 6, 8, 12, 18, 24].map((count) =>
+                    DropdownMenuItem<int>(
+                      value: count,
+                      child: Text('$count Mikrofon Koltuğu'),
+                    ),
+                  ).toList(),
+                  onChanged: (value) {
+                    if (value != null) selectedSeatCount = value;
+                  },
                 ),
                 const SizedBox(height: 16),
                 const Text('Oda arka planını seç'),
@@ -104,7 +122,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
       ),
     );
     c.dispose();if(title==null||title.trim().length<3)return;
-    try{await Api.post('/rooms',{'title':title.trim(),'backgroundTheme':RoomBackgrounds.files[selectedBackground].replaceAll('.png','')},widget.token);reload();}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('$e')));}
+    try{await Api.post('/rooms',{'title':title.trim(),'backgroundTheme':RoomBackgrounds.files[selectedBackground].replaceAll('.png',''),'seatCount':selectedSeatCount},widget.token);reload();}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('$e')));}
   }
   @override
   Widget build(BuildContext context) {
@@ -209,6 +227,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
                         title: room['title'].toString(),
                         backgroundTheme: room['backgroundTheme']?.toString() ?? "classic_dark",
                         ownerId: room['ownerId']?.toString() ?? '',
+                        seatCount: (room['seatCount'] as num?)?.toInt() ?? 8,
                         token: widget.token,
                       ),
                     ),
@@ -338,7 +357,8 @@ class InteractiveRoomScreen extends StatefulWidget {
   final String roomId, title, token;
   final String backgroundTheme;
   final String ownerId;
-  const InteractiveRoomScreen({super.key, required this.roomId, required this.title, required this.token, required this.ownerId, this.backgroundTheme = "classic_dark"});
+  final int seatCount;
+  const InteractiveRoomScreen({super.key, required this.roomId, required this.title, required this.token, required this.ownerId, this.backgroundTheme = "classic_dark", this.seatCount = 8});
   @override State<InteractiveRoomScreen> createState() => _InteractiveRoomScreenState();
 }
 class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
@@ -414,6 +434,14 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
     socket=io.io('${base.scheme}://${base.authority}/rooms',io.OptionBuilder().setTransports(['websocket']).disableAutoConnect().setAuth({'token':widget.token}).build());
     socket!.onConnect((_){socket!.emit('room:join',{'roomId':widget.roomId});});
     for(final event in ['seats:changed','message:new','moderators:changed','participant:muted']) {socket!.on(event,(_){if(mounted)refresh();});}
+    socket!.on('participant:mic:changed',(data) async {
+      if(!mounted || data is! Map)return;
+      if(data['userId']?.toString()==myId && data['blocked']==true){
+        try{await voice?.localParticipant?.setMicrophoneEnabled(false);}catch(_){}
+        if(mounted)setState(()=>micOn=false);
+      }
+      if(mounted)refresh();
+    });
     socket!.on('room:theme:changed',(data){
       if(!mounted || data is! Map) return;
       if(data['id']?.toString()!=widget.roomId) return;
@@ -448,6 +476,7 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
     await action(() async {await Api.post('/rooms/${widget.roomId}/messages',{'content':content},widget.token);input.clear();await refresh();});
   }
   bool get hasSeat=>seats.any((s)=>s['userId']?.toString()==myId);
+  bool get myMicBlocked=>seats.any((s)=>s['userId']?.toString()==myId && s['micBlocked']==true);
   Future<void> connectVoice() async {
     if(voiceConnecting||voice!=null)return;
     setState(()=>voiceConnecting=true);
@@ -465,17 +494,142 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
   }
   Future<void> toggleMic() async {
     if(voice==null||!hasSeat)return;
+    if(myMicBlocked){
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Yönetici mikrofonunu kapattı')));
+      return;
+    }
     try{await voice!.localParticipant?.setMicrophoneEnabled(!micOn);if(mounted)setState(()=>micOn=!micOn);}
     catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Mikrofon yetkisi: $e')));}
   }
+  Future<bool> confirmRoomAction(String title,String displayName) async {
+    final result=await showDialog<bool>(
+      context:context,
+      builder:(ctx)=>AlertDialog(
+        title:Text(title),
+        content:Text('$displayName için bu işlemi yapmak istiyor musun?'),
+        actions:[
+          TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Vazgeç')),
+          FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Onayla')),
+        ],
+      ),
+    );
+    return result==true;
+  }
+
+  Future<void> chooseParticipantToManage() async {
+    if(!isRoomManager)return;
+    final people=<String,String>{};
+    for(final p in participants){
+      final id=p['id']?.toString();
+      if(id!=null && id!=myId)people[id]=p['name']?.toString()??'Kullanıcı';
+    }
+    for(final s in seats){
+      final id=s['userId']?.toString();
+      if(id!=null && id!=myId)people[id]=s['user']?['displayName']?.toString()??'Kullanıcı';
+    }
+    for(final m in moderators){
+      final id=m['userId']?.toString();
+      if(id!=null && id!=myId)people.putIfAbsent(id,()=>m['user']?['displayName']?.toString()??'Moderatör');
+    }
+    await showModalBottomSheet<void>(
+      context:context,
+      backgroundColor:panel,
+      isScrollControlled:true,
+      builder:(ctx)=>SafeArea(child:SizedBox(
+        height:MediaQuery.sizeOf(ctx).height*.65,
+        child:ListView(children:[
+          const ListTile(title:Text('Yönetilecek katılımcıyı seç')),
+          if(people.isEmpty)const ListTile(title:Text('Şu anda yönetilecek katılımcı yok')),
+          for(final entry in people.entries)
+            ListTile(
+              leading:const CircleAvatar(child:Icon(Icons.person)),
+              title:Text(entry.value),
+              onTap:(){Navigator.pop(ctx);moderatorMenu(entry.key,entry.value);},
+            ),
+        ]),
+      )),
+    );
+  }
+
   Future<void> moderatorMenu(String userId,String displayName) async {
-    if(userId==myId)return;
-    await showModalBottomSheet(context:context,backgroundColor:panel,builder:(ctx)=>SafeArea(child:Column(mainAxisSize:MainAxisSize.min,children:[
-      ListTile(title:Text(displayName,style:const TextStyle(color:gold)),subtitle:const Text('Yönetim işlemleri yalnızca yetkili hesaplarda çalışır')),
-      ListTile(leading:const Icon(Icons.volume_off),title:const Text('Kullanıcıyı sustur'),onTap:(){Navigator.pop(ctx);action(()async{await Api.post('/rooms/${widget.roomId}/mute/$userId',{},widget.token);});}),
-      ListTile(leading:const Icon(Icons.admin_panel_settings),title:const Text('Moderatör yap'),onTap:(){Navigator.pop(ctx);action(()async{await Api.post('/rooms/${widget.roomId}/moderators/$userId',{},widget.token);});}),
-      ListTile(leading:const Icon(Icons.block,color:Colors.redAccent),title:const Text('Odadan yasakla'),onTap:(){Navigator.pop(ctx);action(()async{await Api.post('/rooms/${widget.roomId}/ban/$userId',{},widget.token);});}),
-    ])));
+    if(!isRoomManager || userId==myId || userId==widget.ownerId)return;
+    final matching=seats.where((s)=>s['userId']?.toString()==userId).toList();
+    final seat=matching.isEmpty?null:matching.first;
+    final blocked=seat?['micBlocked']==true;
+    final isModerator=moderators.any((m)=>m['userId']?.toString()==userId);
+    await showModalBottomSheet<void>(
+      context:context,
+      isScrollControlled:true,
+      backgroundColor:panel,
+      builder:(ctx)=>SafeArea(child:SingleChildScrollView(child:Column(
+        mainAxisSize:MainAxisSize.min,
+        children:[
+          ListTile(title:Text(displayName,style:const TextStyle(color:gold)),
+            subtitle:const Text('Oda yönetimi')),
+          if(seat!=null)ListTile(
+            leading:Icon(blocked?Icons.mic:Icons.mic_off,color:gold),
+            title:Text(blocked?'Mikrofon açma izni ver':'Mikrofonunu kapat'),
+            onTap:(){
+              Navigator.pop(ctx);
+              action(() async {
+                final r=await http.patch(
+                  Uri.parse('$apiBase/rooms/${widget.roomId}/microphone/$userId'),
+                  headers:{'Authorization':'Bearer ${widget.token}','Content-Type':'application/json'},
+                  body:jsonEncode({'blocked':!blocked}),
+                );
+                if(r.statusCode>=300)throw Exception('Mikrofon yetkisi: ${r.body}');
+              });
+            },
+          ),
+          if(seat!=null)ListTile(
+            leading:const Icon(Icons.airline_seat_recline_normal),
+            title:const Text('Koltuktan kaldır'),
+            onTap:(){
+              Navigator.pop(ctx);
+              action(() async {await Api.post('/rooms/${widget.roomId}/seats/${seat['seatNumber']}/clear',{},widget.token);});
+            },
+          ),
+          ListTile(
+            leading:const Icon(Icons.logout),
+            title:const Text('Odadan at (banlama yok)'),
+            onTap:() async {
+              Navigator.pop(ctx);
+              if(await confirmRoomAction('Odadan at',displayName)){
+                await action(() async {await Api.post('/rooms/${widget.roomId}/kick/$userId',{},widget.token);});
+              }
+            },
+          ),
+          ListTile(
+            leading:const Icon(Icons.block,color:Colors.redAccent),
+            title:const Text('Odadan banla'),
+            onTap:() async {
+              Navigator.pop(ctx);
+              if(await confirmRoomAction('Odadan banla',displayName)){
+                await action(() async {await Api.post('/rooms/${widget.roomId}/ban/$userId',{},widget.token);});
+              }
+            },
+          ),
+          if(myId==widget.ownerId)ListTile(
+            leading:const Icon(Icons.admin_panel_settings,color:gold),
+            title:Text(isModerator?'Moderatörlüğü kaldır':'Moderatör yap'),
+            onTap:(){
+              Navigator.pop(ctx);
+              action(() async {
+                if(isModerator){
+                  final r=await http.delete(
+                    Uri.parse('$apiBase/rooms/${widget.roomId}/moderators/$userId'),
+                    headers:{'Authorization':'Bearer ${widget.token}'},
+                  );
+                  if(r.statusCode>=300)throw Exception('Moderatör kaldırılamadı: ${r.body}');
+                }else{
+                  await Api.post('/rooms/${widget.roomId}/moderators/$userId',{},widget.token);
+                }
+              });
+            },
+          ),
+        ],
+      ))),
+    );
   }
   Future<void> giftsPreview() async {
     try {
@@ -493,14 +647,22 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
     }catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Hediye kataloğu: $e')));}
   }
   Future<void> selectGiftRecipient(Map<String,dynamic> gift) async {
-    final eligible=participants.where((p)=>p['id']?.toString()!=myId && p['id']!=null).toList();
-    if(eligible.isEmpty){ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Önce odaya başka bir kullanıcı katılmalı')));return;}
-    await showModalBottomSheet(context:context,backgroundColor:panel,builder:(ctx)=>SafeArea(child:ListView(shrinkWrap:true,children:[
+    final recipients=<String,String>{};
+    for(final p in participants){
+      final id=p['id']?.toString();
+      if(id!=null && id!=myId)recipients[id]=p['name']?.toString()??'Kullanıcı';
+    }
+    for(final s in seats){
+      final id=s['userId']?.toString();
+      if(id!=null && id!=myId)recipients[id]=s['user']?['displayName']?.toString()??'Kullanıcı';
+    }
+    if(recipients.isEmpty){ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Önce odaya başka bir kullanıcı katılmalı')));return;}
+    await showModalBottomSheet(context:context,backgroundColor:panel,isScrollControlled:true,builder:(ctx)=>SafeArea(child:SizedBox(height:MediaQuery.sizeOf(ctx).height*.6,child:ListView(children:[
       ListTile(title:Text('${gift['name']} • ${gift['priceCoins']} Coin'),subtitle:const Text('Alıcı seçin. İşlem coin bakiyenizden düşülür.')),
-      for(final person in eligible)ListTile(leading:const CircleAvatar(child:Icon(Icons.person)),title:Text(person['name']?.toString()??'Kullanıcı'),onTap:()async{
+      for(final person in recipients.entries)ListTile(leading:const CircleAvatar(child:Icon(Icons.person)),title:Text(person.value),onTap:()async{
         Navigator.pop(ctx);
-        final recipient=person['id'].toString();
-        final confirm=await showDialog<bool>(context:context,builder:(d)=>AlertDialog(title:const Text('Hediyeyi gönder?'),content:Text('${person['name']??'Kullanıcı'} için ${gift['priceCoins']} Coin harcanacak.'),actions:[TextButton(onPressed:()=>Navigator.pop(d,false),child:const Text('Vazgeç')),FilledButton(onPressed:()=>Navigator.pop(d,true),child:const Text('Gönder'))]));
+        final recipient=person.key;
+        final confirm=await showDialog<bool>(context:context,builder:(d)=>AlertDialog(title:const Text('Hediyeyi gönder?'),content:Text('${person.value} için ${gift['priceCoins']} Coin harcanacak.'),actions:[TextButton(onPressed:()=>Navigator.pop(d,false),child:const Text('Vazgeç')),FilledButton(onPressed:()=>Navigator.pop(d,true),child:const Text('Gönder'))]));
         if(confirm!=true||!mounted)return;
         await action(()async{
           final requestId='gift_${DateTime.now().microsecondsSinceEpoch}_${myId}';
@@ -508,123 +670,190 @@ class _InteractiveRoomScreenState extends State<InteractiveRoomScreen> {
           if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('🎁 ${gift['name']} gönderildi!')));
         });
       })
-    ])));
+    ]))));
   }
+
+  bool get isRoomManager =>
+      myId != null &&
+      (myId == widget.ownerId ||
+       moderators.any((m) => m['userId']?.toString() == myId));
+
+  Future<void> showSeatManager(int number, bool locked) async {
+    if (!isRoomManager) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: panel,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text('Koltuk $number Yönetimi'),
+              subtitle: Text(locked ? 'Kilitli koltuk' : 'Açık koltuk'),
+            ),
+            if (!locked)
+              ListTile(
+                leading: const Icon(Icons.mic, color: gold),
+                title: const Text('Koltuğa otur'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  takeSeat(number);
+                },
+              ),
+            ListTile(
+              leading: Icon(locked ? Icons.lock_open : Icons.lock),
+              title: Text(locked ? 'Kilidi aç' : 'Koltuğu kilitle'),
+              onTap: () {
+                Navigator.pop(ctx);
+                action(() async {
+                  final response = await http.patch(
+                    Uri.parse('$apiBase/rooms/${widget.roomId}/seats/$number/lock'),
+                    headers: {
+                      'Authorization': 'Bearer ${widget.token}',
+                      'Content-Type': 'application/json',
+                    },
+                    body: jsonEncode({'isLocked': !locked}),
+                  );
+                  if (response.statusCode >= 300) {
+                    throw Exception('Koltuk değiştirilemedi: ${response.body}');
+                  }
+                });
+              },
+            ),
+            ListTile(
+              leading:const Icon(Icons.manage_accounts,color:gold),
+              title:const Text('Katılımcı yönetimi'),
+              onTap:(){
+                Navigator.pop(ctx);
+                chooseParticipantToManage();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _seat(int number,Map<int,dynamic> occupied){
     final vipSeat=number==1;
-    final item=occupied[number];final user=item?['user'];final userId=item?['userId']?.toString();
-    final name=user?['displayName']?.toString()??(vipSeat?'VIP Koltuğu':'Koltuk $number');final mine=userId!=null&&userId==myId;
-    return InkWell(borderRadius:BorderRadius.circular(18),onTap:sending?null:(){if(item==null)takeSeat(number);else if(mine)releaseSeat(number);else if(userId!=null)moderatorMenu(userId,name);},child:Container(padding:const EdgeInsets.symmetric(vertical:12,horizontal:4),decoration:BoxDecoration(color:vipSeat?const Color(0xFF352714):panel,borderRadius:BorderRadius.circular(18),border:Border.all(color:vipSeat?gold:mine?gold:Colors.white12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[
-      CircleAvatar(radius:23,backgroundColor:vipSeat?const Color(0xFF73521B):mine?purple:const Color(0xFF363052),child:Icon(vipSeat?Icons.workspace_premium:user==null?Icons.add:Icons.person,color:vipSeat?gold:mine?gold:Colors.white70)),
-      const SizedBox(height:7),Text(name,maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:11,fontWeight:FontWeight.w600)),
-      Text(mine?'Sen':user==null?'Boş koltuk':'Konuşmacı',style:TextStyle(fontSize:10,color:mine?gold:Colors.white54))
-    ])));
+    final item=occupied[number];
+    final locked=item?['isLocked']==true;
+    final blocked=item?['micBlocked']==true;
+    final user=item?['user'];
+    final userId=item?['userId']?.toString();
+    final name=user?['displayName']?.toString()??(locked?'Kilitli':vipSeat?'VIP':'Boş');
+    final mine=userId!=null&&userId==myId;
+    final avatarUrl=user?['avatarUrl']?.toString();
+    return InkWell(
+      borderRadius:BorderRadius.circular(50),
+      onTap:sending?null:(){
+        if(userId==null){
+          if(isRoomManager){
+            showSeatManager(number,locked);
+          }else if(!locked){
+            takeSeat(number);
+          }else{
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content:Text('Bu koltuk kilitli'))
+            );
+          }
+        }else if(mine){
+          releaseSeat(number);
+        }else if(isRoomManager){
+          moderatorMenu(userId,name);
+        }
+      },
+      child:Column(
+        mainAxisSize:MainAxisSize.min,
+        children:[
+          Container(
+            padding:const EdgeInsets.all(3),
+            decoration:BoxDecoration(
+              shape:BoxShape.circle,
+              color:vipSeat?const Color(0xFF73521B):panel,
+              border:Border.all(
+                color:vipSeat||mine?gold:Colors.white24,
+                width:vipSeat||mine?2.5:1,
+              ),
+              boxShadow:vipSeat||mine?[
+                BoxShadow(color:gold.withValues(alpha:.35),blurRadius:12)
+              ]:[],
+            ),
+            child:CircleAvatar(
+              radius:23,
+              backgroundColor:const Color(0xFF363052),
+              backgroundImage:avatarUrl!=null&&avatarUrl.startsWith('https://')
+                  ?NetworkImage(avatarUrl):null,
+              child:avatarUrl!=null&&avatarUrl.startsWith('https://')
+                  ?null
+                  :Icon(
+                    locked?Icons.lock_outline:vipSeat?Icons.workspace_premium:
+                    user==null?Icons.mic_none:Icons.person,
+                    color:vipSeat?gold:Colors.white70,
+                    size:23,
+                  ),
+            ),
+          ),
+          const SizedBox(height:5),
+          Text(
+            name,
+            maxLines:1,
+            overflow:TextOverflow.ellipsis,
+            textAlign:TextAlign.center,
+            style:TextStyle(
+              fontSize:10,
+              fontWeight:FontWeight.w600,
+              color:vipSeat||mine?gold:Colors.white,
+            ),
+          ),
+          Text(
+            mine?'Sen':user==null?'Boş':blocked?'Susturuldu':'Konuşmacı',
+            maxLines:1,
+            style:const TextStyle(fontSize:9,color:Colors.white60),
+          ),
+        ],
+      ),
+    );
   }
   @override void dispose(){socket?.emit('room:leave',{'roomId':widget.roomId});socket?.dispose();final r=voice;if(r!=null){r.disconnect().then((_)=>r.dispose());}input.dispose();super.dispose();}
   @override Widget build(BuildContext context){
-    final occupied=<int,dynamic>{};for(final s in seats){final n=s['seatNumber'];if(n is int&&s['userId']!=null)occupied[n]=s;}
-    return Scaffold(backgroundColor:bg,appBar:AppBar(backgroundColor:bg,title:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(widget.title,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),Text('BÖRÜ • Oda ${widget.roomId.substring(0,widget.roomId.length<8?widget.roomId.length:8)}',style:const TextStyle(fontSize:11,color:Colors.white54))]),actions:[if(myId != null && myId == widget.ownerId) IconButton(tooltip:'Oda Ayarları',onPressed:showRoomSettings,icon:const Icon(Icons.settings,color:gold)),IconButton(tooltip:'Yenile',onPressed:refresh,icon:const Icon(Icons.refresh)),IconButton(tooltip:'Katılımcılar',onPressed:(){showModalBottomSheet(context:context,backgroundColor:panel,builder:(ctx)=>SafeArea(child:ListView(shrinkWrap:true,children:[const ListTile(title:Text('Canlı katılımcılar')),if(participants.isEmpty)const ListTile(title:Text('Aktif katılımcı bilgisi yok')),for(final p in participants)ListTile(leading:const CircleAvatar(child:Icon(Icons.person)),title:Text(p['name']?.toString()??'Kullanıcı'),trailing:p['isSpeaking']==true?const Icon(Icons.graphic_eq,color:gold):null)])));},icon:const Icon(Icons.people_outline))]),body:SafeArea(child:Column(children:[
-      Expanded(child:ListView(children:[
-        Container(
-          margin: const EdgeInsets.fromLTRB(14, 8, 14, 12),
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            image: DecorationImage(
-              image: AssetImage(
-                RoomBackgrounds.path(
-                  RoomBackgrounds.files.indexOf('${currentTheme}.png') < 0
-                      ? 3
-                      : RoomBackgrounds.files.indexOf('${currentTheme}.png'),
-                ),
-              ),
-              fit: BoxFit.cover,
-              colorFilter: const ColorFilter.mode(
-                Color(0x99000000),
-                BlendMode.darken,
-              ),
-            ),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: gold, width: 1),
-            boxShadow: [
-              BoxShadow(
-                color: purple.withValues(alpha: 0.25),
-                blurRadius: 22,
-                spreadRadius: 2,
-              ),
-            ],
+    final occupied=<int,dynamic>{};for(final s in seats){final n=s['seatNumber'];if(n is int)occupied[n]=s;}
+    final occupiedCount=seats.where((s)=>s['userId']!=null).length;
+    return Scaffold(backgroundColor:bg,appBar:AppBar(backgroundColor:bg,title:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(widget.title,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),Text('BÖRÜ • Oda ${widget.roomId.substring(0,widget.roomId.length<8?widget.roomId.length:8)}',style:const TextStyle(fontSize:11,color:Colors.white54))]),actions:[if(myId != null && myId == widget.ownerId) IconButton(tooltip:'Oda Ayarları',onPressed:showRoomSettings,icon:const Icon(Icons.settings,color:gold)),IconButton(tooltip:'Yenile',onPressed:refresh,icon:const Icon(Icons.refresh)),IconButton(tooltip:'Katılımcılar',onPressed:(){showModalBottomSheet(context:context,backgroundColor:panel,builder:(ctx)=>SafeArea(child:ListView(shrinkWrap:true,children:[const ListTile(title:Text('Canlı katılımcılar')),if(participants.isEmpty)const ListTile(title:Text('Aktif katılımcı bilgisi yok')),for(final p in participants)ListTile(leading:const CircleAvatar(child:Icon(Icons.person)),title:Text(p['name']?.toString()??'Kullanıcı'),trailing:p['isSpeaking']==true?const Icon(Icons.graphic_eq,color:gold):null)])));},icon:const Icon(Icons.people_outline))]),body:Stack(children:[
+      Positioned.fill(
+        child:Image.asset(
+          RoomBackgrounds.path(
+            RoomBackgrounds.files.indexOf('${currentTheme}.png') < 0
+                ? 3
+                : RoomBackgrounds.files.indexOf('${currentTheme}.png'),
           ),
-          child: Column(
-            children: [
-              const Icon(
-                Icons.nights_stay,
-                size: 64,
-                color: gold,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                currentTheme == 'wolf_vip' ? 'BÖRÜ VIP ODA' : 'BÖRÜ ODA',
-                style: TextStyle(
-                  color: gold,
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 3,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                widget.title,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(
-                    Icons.people,
-                    color: Colors.white70,
-                    size: 18,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${participants.length} canlı katılımcı',
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 13,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  const Icon(
-                    Icons.auto_awesome,
-                    color: gold,
-                    size: 20,
-                  ),
-                ],
-              ),
-            ],
-          ),
+          fit:BoxFit.cover,
         ),
+      ),
+      Positioned.fill(
+        child:Container(color:Colors.black.withValues(alpha:.48)),
+      ),
+      SafeArea(child:Column(children:[
+      Expanded(child:ListView(children:[
         if(error!=null)Padding(padding:const EdgeInsets.all(12),child:Text(error!,style:const TextStyle(color:Colors.redAccent))),
-        Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[const Text('🎙️ Mikrofon Koltukları',style:TextStyle(fontSize:17,fontWeight:FontWeight.bold)),Text('${occupied.length}/8',style:const TextStyle(color:gold))])),
+        Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[const Text('🎙️ Mikrofon Koltukları',style:TextStyle(fontSize:17,fontWeight:FontWeight.bold)),Text('$occupiedCount/${widget.seatCount}',style:const TextStyle(color:gold))])),
         if(loading)const LinearProgressIndicator(),
-        GridView.builder(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),padding:const EdgeInsets.all(14),gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:4,mainAxisSpacing:10,crossAxisSpacing:10,childAspectRatio:.78),itemCount:8,itemBuilder:(_,i)=>_seat(i+1,occupied)),
+        GridView.builder(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),padding:const EdgeInsets.symmetric(horizontal:12,vertical:14),gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:6,mainAxisSpacing:16,crossAxisSpacing:6,childAspectRatio:.68),itemCount:widget.seatCount,itemBuilder:(_,i)=>_seat(i+1,occupied)),
         const Padding(padding:EdgeInsets.symmetric(horizontal:16,vertical:8),child:Text('ODA SOHBETİ',style:TextStyle(color:gold,fontWeight:FontWeight.bold,letterSpacing:1))),
         if(messages.isEmpty)const Padding(padding:EdgeInsets.all(20),child:Text('Henüz mesaj yok. İlk mesajı sen gönder!',style:TextStyle(color:Colors.white54))),
         for(final m in messages)Padding(padding:const EdgeInsets.symmetric(horizontal:16,vertical:5),child:Row(crossAxisAlignment:CrossAxisAlignment.start,children:[const Icon(Icons.chat_bubble_outline,size:16,color:gold),const SizedBox(width:8),Expanded(child:Text('${m['sender']?['displayName']??'Kullanıcı'}: ${m['content']??''}',style:const TextStyle(fontSize:13)))])),
       ])),
-      Container(padding:const EdgeInsets.fromLTRB(12,8,12,12),decoration:const BoxDecoration(color:panel,borderRadius:BorderRadius.vertical(top:Radius.circular(20))),child:Column(children:[
+      Container(padding:const EdgeInsets.fromLTRB(12,8,12,12),decoration:BoxDecoration(color:panel.withValues(alpha:.92),borderRadius:const BorderRadius.vertical(top:Radius.circular(20))),child:Column(children:[
         Row(children:[Expanded(child:TextField(controller:input,maxLength:500,maxLines:1,decoration:InputDecoration(hintText:'Mesaj yaz...',counterText:'',isDense:true,filled:true,fillColor:bg,border:OutlineInputBorder(borderRadius:BorderRadius.circular(18),borderSide:BorderSide.none)))),IconButton(onPressed:sending?null:sendMessage,icon:const Icon(Icons.send,color:gold))]),
         Row(mainAxisAlignment:MainAxisAlignment.spaceAround,children:[
-          TextButton.icon(onPressed:voice==null?connectVoice:toggleMic,icon:Icon(voice==null?Icons.headphones:micOn?Icons.mic:Icons.mic_off,color:gold),label:Text(voiceConnecting?'Bağlanıyor':voice==null?'Sese bağlan':micOn?'Sustur':'Mikrofon',style:const TextStyle(color:Colors.white))),
+          TextButton.icon(onPressed:voice==null?connectVoice:myMicBlocked?null:toggleMic,icon:Icon(voice==null?Icons.headphones:myMicBlocked?Icons.mic_off:micOn?Icons.mic:Icons.mic_off,color:gold),label:Text(voiceConnecting?'Bağlanıyor':voice==null?'Sese bağlan':myMicBlocked?'Susturuldu':micOn?'Sustur':'Mikrofon',style:const TextStyle(color:Colors.white))),
           TextButton.icon(onPressed:giftsPreview,icon:const Icon(Icons.card_giftcard,color:gold),label:const Text('Hediyeler',style:TextStyle(color:Colors.white))),
+          IconButton(tooltip:'Coin bakiyem',onPressed:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>WalletScreen(token:widget.token))),icon:const Icon(Icons.toll,color:gold)),
           IconButton(tooltip:'Odadan ayrıl',onPressed:()=>Navigator.pop(context),icon:const Icon(Icons.exit_to_app,color:Colors.white70))
         ])
       ]))
-    ])));
+    ]))]));
   }
 }
 
@@ -637,11 +866,13 @@ class WalletScreen extends StatefulWidget {
 }
 class _WalletScreenState extends State<WalletScreen> {
   late Future<List<dynamic>> gifts;
+  late Future<List<dynamic>> packages;
   late Future<Map<String,dynamic>> wallet;
   @override void initState(){super.initState();refresh();}
   void refresh(){setState(() {
     wallet=Api.getAuthorized('/economy/wallet',widget.token).then((v)=>Map<String,dynamic>.from(v));
     gifts=Api.getAuthorized('/economy/gifts',widget.token).then((v)=>List<dynamic>.from(v));
+    packages=Api.getAuthorized('/economy/packages',widget.token).then((v)=>List<dynamic>.from(v));
   });}
   @override Widget build(BuildContext context)=>Scaffold(
     appBar:AppBar(title:const Text('BÖRÜ • Cüzdan'),actions:[IconButton(onPressed:refresh,icon:const Icon(Icons.refresh))]),
@@ -652,6 +883,20 @@ class _WalletScreenState extends State<WalletScreen> {
         FutureBuilder<Map<String,dynamic>>(future:wallet,builder:(ctx,s)=>Text(s.hasData?'${s.data!['balance']} Coin':s.hasError?'Bakiye yüklenemedi':'Yükleniyor...',style:const TextStyle(fontSize:26,fontWeight:FontWeight.bold))),
         const SizedBox(height:8),const Text('Coinler nakde çevrilemez',style:TextStyle(color:Colors.white70)),
       ]))),
+      const SizedBox(height:18),const Text('Coin Paketleri',style:TextStyle(fontSize:20,fontWeight:FontWeight.bold)),
+      FutureBuilder<List<dynamic>>(future:packages,builder:(ctx,s){
+        if(s.hasError)return const Text('Coin paketleri yüklenemedi');
+        if(!s.hasData)return const LinearProgressIndicator();
+        if(s.data!.isEmpty)return const Text('Henüz coin paketi tanımlanmadı.');
+        return Column(children:[
+          for(final package in s.data!)ListTile(
+            leading:const Icon(Icons.toll,color:Color(0xFFE9B653)),
+            title:Text(package['title']?.toString()??'Coin paketi'),
+            subtitle:Text('${package['coins']} Coin'),
+            trailing:const Text('Yakında',style:TextStyle(color:Colors.white54)),
+          ),
+        ]);
+      }),
       const SizedBox(height:18),const Text('Sanal Hediyeler',style:TextStyle(fontSize:20,fontWeight:FontWeight.bold)),
       FutureBuilder<List<dynamic>>(future:gifts,builder:(ctx,s){
         if(s.hasError)return Text('Hediyeler yüklenemedi: ${s.error}');

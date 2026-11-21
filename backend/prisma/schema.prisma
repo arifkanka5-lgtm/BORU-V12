@@ -26,6 +26,7 @@ model Room {
   id String @id @default(uuid())
   title String
   backgroundTheme String @default("classic_dark")
+  seatCount Int @default(8)
   isPrivate Boolean @default(false)
   ownerId String
   owner User @relation(fields:[ownerId],references:[id])
@@ -41,6 +42,8 @@ model RoomSeat {
   roomId String
   room Room @relation(fields:[roomId], references:[id], onDelete:Cascade)
   seatNumber Int
+  isLocked Boolean @default(false)
+  micBlocked Boolean @default(false)
   userId String?
   user User? @relation(fields:[userId], references:[id], onDelete:SetNull)
   updatedAt DateTime @updatedAt
